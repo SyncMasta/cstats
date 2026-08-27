@@ -19,6 +19,7 @@ successful fetch with nothing in the UI saying so.
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -26,7 +27,6 @@ import urllib.request
 from . import config
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CREDS = os.path.expanduser("~/.claude/.credentials.json")
 
 CACHE_TTL = 60          # serve the cached response for this long without asking
 MIN_FETCH_INTERVAL = 20 # hard floor between two requests, even on a forced refresh
@@ -42,8 +42,22 @@ class UsageLimits:
         self.five_hour_resets_at = None
         self.seven_day_pct = None
         self.seven_day_resets_at = None
+        # Model-family weekly windows. Plans without a separate cap for a
+        # family report null for it, so these stay None and nothing is shown —
+        # but where they exist (Max plans cap Opus separately) the family
+        # window is regularly the one that actually blocks, and the error it
+        # produces differs: switching model with /model helps against a family
+        # limit and does nothing against the plan-wide weekly one.
+        self.seven_day_opus_pct = None
+        self.seven_day_opus_resets_at = None
+        self.seven_day_sonnet_pct = None
+        self.seven_day_sonnet_resets_at = None
         self.extra_usage_enabled = False
         self.extra_usage_used = 0.0
+        # Credits consumed without the ceiling they run against is a number
+        # with no reference size; the endpoint reports both, so show both.
+        self.extra_usage_limit = None
+        self.extra_usage_pct = None
         self.raw = None
         # freshness of the underlying response
         self.fetched_at = None   # epoch seconds of the response we are showing
@@ -81,9 +95,43 @@ def response_cache():
     return os.path.join(base, "cstats", "limits.json")
 
 
+def credentials_path():
+    """Path of Claude Code's credentials file, honoring CLAUDE_CONFIG_DIR.
+
+    A function, not a module constant, for the same reason every cache path is
+    one (AGENTS.md rule 3): a constant is resolved at import, before a test can
+    redirect the environment. This module was the last one still hard-coding
+    ~/.claude while claude_parser, caveman and tools/measure_facts.py all
+    honoured the variable, so a run against a synthetic config dir read the
+    real credentials.
+    """
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = os.path.expanduser(env) if env else os.path.expanduser("~/.claude")
+    return os.path.join(base, ".credentials.json")
+
+
+# macOS keeps the OAuth token in the login keychain (service name
+# "Claude Code-credentials") rather than in a file, so the file is legitimately
+# absent there and "no token" is the wrong conclusion to report. Reading the
+# keychain would need `security find-generic-password`, which can raise a
+# blocking system prompt from inside the refresh thread — not something to do
+# behind the user's back, so the reason line names the keychain instead.
+_MACOS_KEYCHAIN_HINT = (
+    "no OAuth token: on macOS Claude Code stores it in the login keychain "
+    "(service \"Claude Code-credentials\"), which this tool does not read"
+)
+
+
+def _no_token_reason():
+    """Why there is no token, phrased for the platform we are actually on."""
+    if sys.platform == "darwin":
+        return _MACOS_KEYCHAIN_HINT
+    return f"no OAuth token in {credentials_path()}"
+
+
 def _access_token():
     try:
-        with open(CREDS, "r", encoding="utf-8") as fh:
+        with open(credentials_path(), "r", encoding="utf-8") as fh:
             data = json.load(fh)
         tok = (data.get("claudeAiOauth") or {}).get("accessToken")
         return tok
@@ -167,14 +215,38 @@ def _from_raw(data, fetched_at=None, rate_limited=False, retry_in=None) -> Usage
     limits.retry_in = retry_in
     fh = data.get("five_hour") or {}
     sd = data.get("seven_day") or {}
+    # `or {}` is load-bearing here: an absent family cap is reported as a null
+    # value for the whole key, not as an object with a null utilization.
+    op = data.get("seven_day_opus") or {}
+    so = data.get("seven_day_sonnet") or {}
     eu = data.get("extra_usage") or {}
     limits.five_hour_pct = fh.get("utilization")
     limits.five_hour_resets_at = fh.get("resets_at")
     limits.seven_day_pct = sd.get("utilization")
     limits.seven_day_resets_at = sd.get("resets_at")
+    limits.seven_day_opus_pct = op.get("utilization")
+    limits.seven_day_opus_resets_at = op.get("resets_at")
+    limits.seven_day_sonnet_pct = so.get("utilization")
+    limits.seven_day_sonnet_resets_at = so.get("resets_at")
     limits.extra_usage_enabled = bool(eu.get("is_enabled"))
+    # used_credits / monthly_limit / utilization are each independently null
+    # while extra usage is enabled but unused, so none of them may be coerced
+    # to 0.0 as a group — a limit of 0 reads as "no headroom", which is the
+    # opposite of "not reported".
     limits.extra_usage_used = float(eu.get("used_credits") or 0.0)
+    limits.extra_usage_limit = _opt_float(eu.get("monthly_limit"))
+    limits.extra_usage_pct = _opt_float(eu.get("utilization"))
     return limits
+
+
+def _opt_float(v):
+    """float(v), or None when the endpoint reported nothing for the field."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def fetch_limits(timeout=15, force=False) -> UsageLimits:
@@ -206,7 +278,7 @@ def fetch_limits(timeout=15, force=False) -> UsageLimits:
     if not tok:
         if cached:
             return _from_raw(cached, entry["ts"])
-        return _empty("no OAuth token in ~/.claude/.credentials.json")
+        return _empty(_no_token_reason())
 
     try:
         req = urllib.request.Request(

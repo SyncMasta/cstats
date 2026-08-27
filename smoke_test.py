@@ -208,6 +208,7 @@ async def main():
         check_unreadable_is_not_empty()
         check_caveman_dedupes_unlabelled_snapshots()
         check_limits_say_why()
+        check_model_limit_windows()
         check_backoff_survives_without_a_response()
         check_backoff_escalates()
         check_history_survives_a_bad_line()
@@ -493,6 +494,89 @@ def check_narrow_widths(d):
             for needed in ("Started", "Msgs", "s/S sort"):
                 assert needed in out, \
                     f"render_sessions with a filter lost {needed!r} at width {width}"
+
+
+def check_model_limit_windows():
+    """A model-family cap is shown when reported and absent when it is not.
+
+    The endpoint reports `seven_day_opus` / `seven_day_sonnet` as null on plans
+    that do not cap a family separately — null for the whole key, not an object
+    with a null utilization — so a naive `data.get(k).get("utilization")` reads
+    a window that does not exist and draws an empty bar for it.
+
+    Where a family cap does exist it is regularly the window that actually
+    blocks, so it also has to survive an 80-column terminal: four windows wrap
+    the panel to two rows, and the pace table's fixed-width Window column has
+    to fit the longest label or rich truncates it — the check_narrow_widths()
+    trap, one table further on.
+
+    Reset times are built relative to now on purpose. Pinned to a literal date
+    they eventually fall into the past, every pace row is then skipped as
+    expired, and the half of this check that watches the pace table quietly
+    stops running while still reporting a pass.
+    """
+    from datetime import datetime, timedelta, timezone
+    from rich.console import Console
+    from cstats import aggregate, limits as limits_mod, views
+
+    now = datetime.now(timezone.utc)
+
+    def iso(delta):
+        return (now + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def dash(raw):
+        d = aggregate.Dashboard()
+        d.limits = limits_mod._from_raw(raw)
+        return d
+
+    # 3 of the 7 days left, so 57% of the window has elapsed: Opus at 88% is
+    # over pace, Sonnet at 12% is not. Both verdicts are asserted below, so a
+    # window silently dropped from the pace table cannot pass as "on track".
+    base = {
+        "five_hour": {"utilization": 40.0, "resets_at": iso(timedelta(hours=2))},
+        "seven_day": {"utilization": 35.0, "resets_at": iso(timedelta(days=3))},
+        "extra_usage": {"is_enabled": True, "monthly_limit": 50.0,
+                        "used_credits": 12.0, "utilization": 24.0},
+    }
+
+    # 1. a plan without family caps reports null and gets no window
+    d = dash(dict(base, seven_day_opus=None, seven_day_sonnet=None))
+    assert d.limits.seven_day_opus_pct is None, "a null family cap became a number"
+    titles = [t for t, _s, _p, _r, _h in views._limit_windows(d.limits)]
+    assert titles == ["5h session window", "7d weekly window"], \
+        f"absent family caps still produced windows: {titles}"
+
+    # 2. the same distinction for extra usage: unreported is not zero
+    assert d.limits.extra_usage_limit == 50.0, "monthly_limit was dropped"
+    bare = dict(base, extra_usage={"is_enabled": True, "monthly_limit": None,
+                                   "used_credits": None, "utilization": None})
+    assert dash(bare).limits.extra_usage_limit is None, \
+        "an unreported spend ceiling became 0 — that reads as no headroom left"
+
+    # 3. reported caps survive a narrow terminal, panel and pace table alike
+    d = dash(dict(base,
+                  seven_day_opus={"utilization": 88.0, "resets_at": iso(timedelta(days=3))},
+                  seven_day_sonnet={"utilization": 12.0, "resets_at": iso(timedelta(days=3))}))
+    assert len(views._limit_windows(d.limits)) == 4, "a reported family cap was dropped"
+    for width in (80, 100, 120):
+        console = Console(width=width, record=True)
+        console.begin_capture()
+        console.print(views.render_limits(d, width=width))
+        out = console.end_capture()
+        for needed in ("7d Opus window", "7d Sonnet window", "88.0%",
+                       "12 of 50 credits"):
+            assert needed in out, f"render_limits lost {needed!r} at width {width}"
+        # Assert on the pace ROW, not on the document: the panel above prints
+        # the same labels, so `"7d Opus" in out` is satisfied by the panel even
+        # when the pace table truncated its own Window column to "7d Opu…".
+        for verdict, label in (("over budget pace", "7d Opus"),
+                               ("on track", "7d Sonnet")):
+            rows = [ln for ln in out.splitlines() if verdict in ln]
+            assert rows, f"no pace row said {verdict!r} at width {width}"
+            assert any(label in ln for ln in rows), \
+                (f"the pace row for {label} lost its label at width {width} — "
+                 f"the Window column is too narrow: {rows}")
+        assert "Projection" in out, f"the pace table lost Projection at width {width}"
 
 
 def check_unreadable_is_not_empty():

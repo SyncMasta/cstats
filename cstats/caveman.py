@@ -13,8 +13,6 @@ from datetime import datetime, timezone
 
 from .rtk import STATUS_OK, STATUS_EMPTY, STATUS_MISSING, STATUS_ERROR
 
-CAVEMAN_HISTORY = os.path.expanduser("~/.claude/.caveman-history.jsonl")
-
 
 def _claude_dir():
     env = os.environ.get("CLAUDE_CONFIG_DIR")

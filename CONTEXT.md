@@ -7,40 +7,47 @@ agents in `AGENTS.md`.
 
 ## Current state
 
-- Branch: `main`, clean, no remote yet
-- Version 0.4.0. All three suites green: `smoke_test.py`, `test_compacts.py`,
-  `test_session_cache.py`
+- Branch: `claude/cstats-project-review-b9hmby`, pushed to
+  `github.com/SyncMasta/cstats` (PR #1). The repo also lives at `NEXAT/cstats`
+  on the company GitLab; `cstats --update` follows whichever remote the
+  checkout has.
+- Version 0.4.0, `CACHE_VERSION` 13.
+- `test_compacts.py` and `test_session_cache.py` green. `smoke_test.py` needs a
+  real local history — it asserts the Tokens pane scrolls, which a day or two
+  of transcripts cannot fill at 120x40, and stops there on a fresh checkout.
 
 ## Last session
 
-**Renamed to cstats** (was `claude-usage`). The launcher moved to `bin/cstats`
-— a file and a package directory cannot share a name — so the old
-`~/.local/bin/claude-usage` symlink is dead and `--install` was re-run here.
-`config.migrate_legacy_dirs()` carries the old `~/.cache` and `~/.config`
-directories over on first run; theme, threshold, 30 days of limit history and
-the parse caches all survived.
+**Repo review**, then the small findings fixed. `bin/cstats` and
+`scripts/setup_agent_worktree.sh` had lost their executable bit in the GitHub
+web upload, so the documented entry point returned "Permission denied" for
+anyone cloning. Dropped a 1-byte `test` artefact and the dead
+`caveman.CAVEMAN_HISTORY` constant.
 
-**Audited every displayed number** against its source. The tool's own figures
-held up; four did not, and are fixed (details in `ARCHITECTURE.md` §1, §2b, §6c):
+**More of the OAuth response is now read** (`ARCHITECTURE.md` §6). The endpoint
+already returned `seven_day_opus` / `seven_day_sonnet` and the extra-usage
+ceiling; the tool fetched them and threw them away, so the panel could read 35%
+while Opus sat at 88%. `check_model_limit_windows()` covers both directions and
+asserts on the pace *row*: the panel above prints the same labels, so a
+document-wide assertion passes straight over a clipped column.
 
-- forked sessions were billed twice — dedupe was per file, $52 of $10,634. A
-  global claim map fixes it; an independent reimplementation now agrees to
-  0.002%, was 0.33%.
-- rtk was ~13x overstated (it prices untruncated command output that Claude
-  Code caps anyway), caveman 2.15x (no `message.id` dedupe). Both corrected
-  against measurements, both named in the panel. Offset: $1,875, was $5,365.
-- Sonnet 5's introductory price had no end date; prices are dated now.
-
-Before that: docs split into two roles and translated to English,
-`.claude/workflows/` brought over and retargeted, and a `repo-audit` round
-(cache isolation, failure-vs-empty, view purity, security, dead code).
+`limits.credentials_path()` honours `CLAUDE_CONFIG_DIR` like every other reader
+(this module was the last hold-out) and the no-token reason names the macOS
+keychain instead of a path that does not exist there.
 
 ## Open
 
-- Nothing blocking. The repo lives at `NEXAT/cstats` on the company GitLab and
-  `cstats --update` works. The project is private because the NEXAT group is —
-  GitLab refuses `internal` inside a private namespace — so colleagues reach it
-  through their NEXAT group membership rather than by browsing.
+- **macOS has no token to read.** Claude Code stores it in the login keychain
+  (`Claude Code-credentials`). Reading it means `security find-generic-password`,
+  which can raise a blocking system prompt from the refresh thread — deliberately
+  not done; the reason line says so instead. Unresolved, not forgotten.
+- **OpenTelemetry is the one unused source.** Documented for individual Pro/Max
+  accounts; `claude_code.api_request` carries `cost_usd_micros`, `query_source`
+  (main/subagent/auxiliary) and per-skill/plugin/MCP attribution. Subagent cost
+  is not derivable from the transcripts at all (§6c: **0 lines** with
+  `isSidechain: true`), and `claude_code.cost.usage` is the only outside check
+  on our own price table. Fits the rtk/caveman pattern. The Admin and Claude
+  Code Analytics APIs report the same thing but need an org and an admin key.
 - The compaction hint fires at $0.10/turn and ordinary sessions now sit right
   there. If it gets noisy, raise the threshold in the TUI with `,`.
   Deliberately not changed in code.
