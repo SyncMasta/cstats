@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Launcher for the cstats dashboard.
+# Auto-creates the venv on first run and starts the TUI.
+set -euo pipefail
+
+# resolve symlinks so $DIR is always the repo checkout, not e.g. ~/.local/bin
+# (readlink -f is GNU-only; fall back to python for macOS/BSD)
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null \
+  || python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "${BASH_SOURCE[0]}")"
+# the launcher lives in bin/, the repo is its parent
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+VENV="$DIR/.venv"
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "Creating virtualenv and installing dependencies (first run)..."
+  python3 -m venv "$VENV"
+  "$VENV/bin/pip" install --quiet --upgrade pip
+  "$VENV/bin/pip" install --quiet -r "$DIR/requirements.txt"
+fi
+
+exec env PYTHONPATH="$DIR" "$VENV/bin/python" -m cstats "$@"
