@@ -1,0 +1,6 @@
+# the launcher bootstraps its venv inside the checkout (bin/cstats)
+.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
