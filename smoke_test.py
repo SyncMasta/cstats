@@ -209,6 +209,7 @@ async def main():
         check_caveman_dedupes_unlabelled_snapshots()
         check_limits_say_why()
         check_model_limit_windows()
+        check_otel_reader()
         check_backoff_survives_without_a_response()
         check_backoff_escalates()
         check_history_survives_a_bad_line()
@@ -577,6 +578,136 @@ def check_model_limit_windows():
                 (f"the pace row for {label} lost its label at width {width} — "
                  f"the Window column is too narrow: {rows}")
         assert "Projection" in out, f"the pace table lost Projection at width {width}"
+
+
+OTEL_FIXTURE = """# HELP claude_code_cost_usage_USD_total Cost of the session
+# TYPE claude_code_cost_usage_USD_total counter
+claude_code_cost_usage_USD_total{model="claude-opus-5",query_source="main",session_id="s1"} 6.25
+claude_code_cost_usage_USD_total{model="claude-opus-5",query_source="subagent",agent_name="Explore"} 1.75
+claude_code_cost_usage_USD_total{model="claude-haiku-4-5",query_source="auxiliary"} 0.10
+claude_code_cost_usage_USD_total{query_source="main",skill_name="pdf",mcp_server_name="git\\"hub"} 2.00
+# TYPE claude_code_token_usage_tokens_total counter
+claude_code_token_usage_tokens_total{type="input"} 12000
+claude_code_token_usage_tokens_total{type="cacheRead"} 940000
+claude_code_session_count_total{start_type="fresh"} 2
+claude_code_lines_of_code_count_total{type="added"} 1543
+claude_code_lines_of_code_count_total{type="removed"} 892
+claude_code_commit_count_total 12
+claude_code_active_time_total_s_total{type="user"} 3600.5
+claude_code_cost_usage_USD_created{model="claude-opus-5"} 1756400000.0
+claude_code_brand_new_metric_total{foo="bar"} 7
+target_info{service_name="claude-code"} 1
+"""
+
+
+def check_otel_reader():
+    """The Prometheus scrape: names, parsing, statuses, and what it must not eat.
+
+    This source has no file to read (Claude Code exports telemetry to `otlp`,
+    `prometheus`, `console` or `none` — none of them a file), so the reader
+    scrapes a live endpoint and everything below is what can be pinned without
+    one running. The end-to-end path against a real Claude Code is not covered
+    here and is not claimed to be.
+    """
+    from cstats import otel
+
+    # 1. The exporter emits two name shapes for the same metric: Claude Code
+    # omits the USD/tokens/s units when prometheus is the only exporter listed.
+    # Matching literally would read nothing on half the configurations.
+    for raw, want in (
+        ("claude_code_cost_usage_USD_total", "claude_code_cost_usage"),
+        ("claude_code_cost_usage_total", "claude_code_cost_usage"),
+        ("claude_code_token_usage_tokens_total", "claude_code_token_usage"),
+        ("claude_code_session_count_total", "claude_code_session_count"),
+        # ...and this one genuinely ends in "total", so the suffix may only
+        # ever be stripped once
+        ("claude_code_active_time_total_s_total", "claude_code_active_time_total"),
+        ("claude_code_active_time_total_total", "claude_code_active_time_total"),
+    ):
+        got = otel._canonical(raw)
+        assert got == want, f"{raw} normalised to {got!r}, expected {want!r}"
+
+    # 2. Parsing, against the traps the format actually carries
+    samples = otel.parse_exposition(OTEL_FIXTURE)
+    names = {n for n, _l, _v in samples}
+    assert "claude_code_cost_usage" in names, "the cost metric did not survive parsing"
+    assert not any(n.endswith("_created") for n in names), \
+        "a _created series survived — summing its epoch seconds into USD would be silent nonsense"
+    labels = [l for n, l, _v in samples if n == "claude_code_cost_usage"]
+    assert any(l.get("mcp_server_name") == 'git"hub' for l in labels), \
+        "an escaped quote inside a label value was not unescaped"
+
+    # 3. Aggregation, through a real HTTP round trip so _fetch is covered too
+    import http.server, socketserver, threading
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = OTEL_FIXTURE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        o = otel.load_otel(url=f"http://127.0.0.1:{port}/metrics")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert o.status == "ok" and o.available, f"a good scrape reported {o.status}"
+    assert abs(o.total_cost_usd - 10.10) < 1e-9, \
+        f"cost total {o.total_cost_usd} — a _created series or target_info leaked in"
+    assert o.cost_by_source["subagent"] == 1.75, "the subagent split was lost"
+    # the whole reason this source exists: a subagent leaves no transcript
+    assert abs(o.subagent_share - 1.75 / 10.10) < 1e-9, "subagent share is wrong"
+    assert o.cost_by_agent == {"Explore": 1.75}, "agent attribution was lost"
+    assert o.lines_added == 1543 and o.lines_removed == 892, "lines_of_code split is wrong"
+    assert o.active_time_s == 3600.5, "the unit-suffixed metric did not land"
+    # A metric we do not know must be named, not swallowed: a renamed metric is
+    # exactly how this integration would go quietly blind.
+    assert o.unknown_metrics == ["claude_code_brand_new_metric"], \
+        f"unknown metric not reported: {o.unknown_metrics}"
+
+    # 4. Nothing listening is the ordinary "not set up" case, not a defect
+    dead = otel.load_otel(url="http://127.0.0.1:1/metrics", timeout=1)
+    assert dead.status == "missing", f"a refused connection reported {dead.status}"
+    assert not dead.available and dead.hint, "the missing case must say what to do"
+
+    # 5. Cache round trip: the scrape time travels with the numbers, because
+    # these counters describe a process that may already have exited
+    from cstats import aggregate
+    back = aggregate._otel_from_json(aggregate._otel_to_json(o))
+    assert back.total_cost_usd == o.total_cost_usd, "cost did not survive the cache"
+    assert back.cost_by_source == o.cost_by_source, "the source split did not survive"
+    assert back.scraped_at == o.scraped_at, "the scrape time was dropped"
+    assert aggregate._otel_from_json({}).status == "missing", \
+        "an absent cache entry must read as missing, not as ok"
+
+    # 6. The panel: absent when there is nothing, and intact at 80 columns
+    from rich.console import Console
+    from cstats import views
+    assert views.render_otel(aggregate.Dashboard()) is None, \
+        "the panel must not appear on a machine with no telemetry"
+    d = aggregate.Dashboard()
+    d.otel = o
+    for width in (80, 100, 120):
+        console = Console(width=width, record=True)
+        console.begin_capture()
+        console.print(views.render_otel(d))
+        out = console.end_capture()
+        for needed in ("subagent", "Explore", "$1.75"):
+            assert needed in out, f"render_otel lost {needed!r} at width {width}"
+        # the window statement is load-bearing: without it a Claude Code
+        # restart (counters back to zero) reads as data loss
+        assert "running Claude Code process" in out, \
+            f"the panel dropped its window caveat at width {width}"
 
 
 def check_unreadable_is_not_empty():

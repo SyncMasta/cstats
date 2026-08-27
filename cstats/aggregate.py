@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import claude_parser, rtk, caveman, pricing
 from . import compacts as compacts_mod
+from . import otel as otel_mod
 from . import limits as limits_mod
 from .rtk import RtkStats
 from .caveman import CavemanStats
@@ -48,11 +49,15 @@ def _dominant_model(s):
 
 class Dashboard:
     def __init__(self, sessions=None, limits=None, rtk_stats=None, caveman_stats=None,
-                 generated_at=None, context=None, compact_stats=None, warnings=None):
+                 generated_at=None, context=None, compact_stats=None, warnings=None,
+                 otel_stats=None):
         self.sessions = sessions or []
         self.limits = limits or limits_mod.UsageLimits()
         self.rtk = rtk_stats or rtk.RtkStats()
         self.caveman = caveman_stats or caveman.CavemanStats()
+        # Claude Code's own telemetry, scraped live. Optional like rtk and
+        # caveman, and the only source that can attribute cost to a subagent.
+        self.otel = otel_stats or otel_mod.OtelStats()
         # measured compaction history; feeds the break-even model in economics.py
         # with real post-compact context sizes instead of an assumption
         self.compacts = compact_stats or compacts_mod.CompactStats()
@@ -280,6 +285,7 @@ def build(force_limits=False) -> Dashboard:
     lim = limits_mod.fetch_limits(force=force_limits)
     r = rtk.load_rtk()
     c = caveman.load_caveman()
+    o = otel_mod.load_otel()
     ctx = claude_parser.current_contexts()
     cs = compacts_mod.load_compacts()
     # annotates the active contexts in place with growth rate and the projected
@@ -289,7 +295,7 @@ def build(force_limits=False) -> Dashboard:
     if cs.status == compacts_mod.STATUS_ERROR and cs.hint:
         problems.append(cs.hint)
     return Dashboard(sessions, lim, r, c, context=ctx, compact_stats=cs,
-                     warnings=problems)
+                     warnings=problems, otel_stats=o)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +304,7 @@ def build(force_limits=False) -> Dashboard:
 # counts, not the full transcripts.
 # ---------------------------------------------------------------------------
 # bump when the cached shape changes so old caches are discarded automatically
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 
 
 def dashboard_to_json(d: Dashboard) -> dict:
@@ -338,6 +344,7 @@ def dashboard_to_json(d: Dashboard) -> dict:
         "limits": _limits_to_json(d.limits),
         "rtk": _rtk_to_json(d.rtk),
         "caveman": _caveman_to_json(d.caveman),
+        "otel": _otel_to_json(d.otel),
         "compacts": compacts_mod.to_json(d.compacts),
         "model_tokens": d.model_tokens,
     }
@@ -385,6 +392,7 @@ def dashboard_from_json(obj: dict) -> Dashboard | None:
     d.limits = _limits_from_json(obj.get("limits") or {})
     d.rtk = _rtk_from_json(obj.get("rtk") or {})
     d.caveman = _caveman_from_json(obj.get("caveman") or {})
+    d.otel = _otel_from_json(obj.get("otel") or {})
     d.compacts = compacts_mod.from_json(obj.get("compacts") or {})
     d.model_tokens = {k: dict(v) for k, v in (obj.get("model_tokens") or {}).items()}
     # must run last: it labels the restored rtk/caveman stats, so running it
@@ -484,6 +492,50 @@ def _rtk_from_json(obj: dict) -> RtkStats:
     r.top_projects = [list(p) for p in (obj.get("top_projects") or [])]
     r.today_by_project = {k: tuple(v) for k, v in (obj.get("today_by_project") or {}).items()}
     return r
+
+
+_OTEL_SCALARS = ("total_cost_usd", "total_tokens", "sessions", "lines_added",
+                 "lines_removed", "commits", "pull_requests", "active_time_s")
+_OTEL_BUCKETS = ("cost_by_source", "cost_by_model", "cost_by_agent",
+                 "cost_by_skill", "cost_by_mcp_server", "tokens_by_type",
+                 "edit_decisions")
+
+
+def _otel_to_json(o) -> dict:
+    """Persist the scrape so a cache-first render is not blank.
+
+    `scraped_at` travels with it and is not optional: these counters belong to
+    a Claude Code *process*, so a restored snapshot can describe one that has
+    since exited — and the counters restart at zero when it does. Without the
+    age, a restart reads as data loss rather than as a new process.
+    """
+    out = {"status": o.status, "available": o.available, "hint": o.hint,
+           "endpoint": o.endpoint, "scraped_at": o.scraped_at,
+           "unknown_metrics": list(o.unknown_metrics)}
+    for k in _OTEL_SCALARS:
+        out[k] = getattr(o, k)
+    for k in _OTEL_BUCKETS:
+        out[k] = dict(getattr(o, k))
+    return out
+
+
+def _otel_from_json(obj: dict) -> otel_mod.OtelStats:
+    o = otel_mod.OtelStats()
+    if not obj:
+        return o
+    o.status = obj.get("status") or otel_mod.STATUS_MISSING
+    o.available = bool(obj.get("available"))
+    o.hint = obj.get("hint") or ""
+    o.endpoint = obj.get("endpoint")
+    o.scraped_at = obj.get("scraped_at")
+    o.unknown_metrics = list(obj.get("unknown_metrics") or [])
+    for k in _OTEL_SCALARS:
+        v = obj.get(k)
+        if v is not None:
+            setattr(o, k, v)
+    for k in _OTEL_BUCKETS:
+        setattr(o, k, dict(obj.get(k) or {}))
+    return o
 
 
 def _caveman_to_json(c) -> dict:

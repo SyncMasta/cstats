@@ -12,6 +12,7 @@ from rich import box
 
 from .pricing import display_name, context_window
 from . import aggregate, claude_parser, config, economics
+from . import rtk as rtk_mod
 
 
 def _local(iso, fmt="%Y-%m-%d %H:%M"):
@@ -338,6 +339,9 @@ TOOL_INFO = {
             "~/.local/share/rtk/history.db"),
     "caveman": ("caveman (output compression)", "compresses the agent's own wording",
                 "~/.claude/.caveman-history.jsonl"),
+    "telemetry": ("Claude Code telemetry",
+                  "attributes cost to subagents, skills and MCP servers",
+                  "http://127.0.0.1:9464/metrics (OTEL_METRICS_EXPORTER=prometheus)"),
 }
 
 
@@ -1431,9 +1435,107 @@ def render_model_alt(d: aggregate.Dashboard):
                  border_style="dim")
 
 
+def render_otel(d: aggregate.Dashboard):
+    """Claude Code's own telemetry: what the running process attributes to whom.
+
+    Returns None when there is nothing scraped, so the Economics tab does not
+    grow an empty box on the machines that never enable telemetry — the same
+    treatment the compaction and pace panels get.
+
+    Deliberately *not* here: a comparison against this dashboard's own cost.
+    The tempting cross-check (Claude Code prices the same calls, so it could
+    audit our price table) needs a shared window and there is none — these
+    counters start when the Claude Code process starts, while every other total
+    on this dashboard covers the whole history. Printing the two side by side
+    would produce a difference that looks meaningful and is not.
+    """
+    o = getattr(d, "otel", None)
+    if o is None:
+        return None
+    if not o.available:
+        # `missing` means nothing is listening — the ordinary state of a machine
+        # that never opted in, and a permanent "not enabled" box for it would be
+        # noise on every other tab load. `empty` and `error` are different: you
+        # configured something and it is not working, and a silent panel then
+        # leaves you with no way to tell a wrong port from a quiet one. That
+        # distinction is the entire reason this source has four statuses.
+        if o.status == rtk_mod.STATUS_MISSING:
+            return None
+        return Panel(Group(*unavailable_lines("telemetry", o, verbose=True)),
+                     title="Claude Code telemetry", border_style="dim")
+
+    blocks = []
+
+    # The headline, and the reason this source exists: a subagent writes no
+    # transcript (ARCHITECTURE.md §6c, 0 lines with isSidechain), so this split
+    # is not available anywhere else in the tool.
+    if o.cost_by_source:
+        rows = []
+        total = o.total_cost_usd or 0.0
+        for src in ("main", "subagent", "auxiliary"):
+            usd = o.cost_by_source.get(src)
+            if usd is None:
+                continue
+            share = f"{usd / total * 100:.0f}%" if total else "—"
+            rows.append((src, fmt_cost(usd), share))
+        for src, usd in sorted(o.cost_by_source.items(), key=lambda kv: -kv[1]):
+            if src not in ("main", "subagent", "auxiliary"):
+                share = f"{usd / total * 100:.0f}%" if total else "—"
+                rows.append((src, fmt_cost(usd), share))
+        if rows:
+            blocks.append(Text("by query source", style="bold cyan"))
+            blocks.append(_label_rows([(lbl, amt, sh) for lbl, amt, sh in rows]))
+
+    # Attribution the transcripts cannot produce either. Each section appears
+    # only once it has a row: an empty "skills" heading says nothing.
+    for title, bucket in (("by agent", o.cost_by_agent),
+                          ("by skill", o.cost_by_skill),
+                          ("by MCP server", o.cost_by_mcp_server)):
+        if not bucket:
+            continue
+        top = sorted(bucket.items(), key=lambda kv: -kv[1])[:5]
+        blocks.append(Text(""))
+        blocks.append(Text(title, style="bold cyan"))
+        blocks.append(_label_rows([(name, fmt_cost(usd), "") for name, usd in top]))
+
+    if o.lines_added or o.lines_removed or o.commits or o.pull_requests:
+        blocks.append(Text(""))
+        parts = [f"+{fmt_int(o.lines_added)}/-{fmt_int(o.lines_removed)} lines"]
+        if o.commits:
+            parts.append(f"{fmt_int(o.commits)} commits")
+        if o.pull_requests:
+            parts.append(f"{fmt_int(o.pull_requests)} PRs")
+        if o.active_time_s:
+            parts.append(f"{fmt_until(o.active_time_s)} active")
+        blocks.append(Text("  \u00b7  ".join(parts), style="dim"))
+
+    # The window statement is not decoration. These counters live in the Claude
+    # Code process and restart at zero with it, so without this line a restart
+    # reads as the numbers having been lost.
+    note = Text("counters cover the running Claude Code process since it started — "
+                "not the history the rest of this dashboard shows", style="dim italic")
+    blocks.append(Text(""))
+    blocks.append(note)
+    # Same age idiom as every other panel whose source ages on its own, and at
+    # the same resolution: fmt_until() is coarse enough to call a 12-second-old
+    # scrape "0min", which is the wrong impression for the freshest number here.
+    if o.scraped_at:
+        blocks.append(_freshness(o.scraped_at, label="scraped") +
+                      Text(f"  \u00b7  {o.endpoint}", style="dim"))
+    else:
+        blocks.append(Text(f"not scraped yet · {o.endpoint}", style="dim"))
+    if o.unknown_metrics:
+        blocks.append(Text("unrecognised metric(s): " + ", ".join(o.unknown_metrics[:3]),
+                           style="yellow"))
+
+    return Panel(Group(*blocks), title="Claude Code telemetry (live)",
+                 border_style="magenta")
+
+
 def render_economics(d: aggregate.Dashboard):
     """Economics tab: compaction history, context pace, model counterfactual."""
-    parts = [p for p in (render_compacts(d), render_pace(d), render_model_alt(d))
+    parts = [p for p in (render_compacts(d), render_pace(d), render_model_alt(d),
+                         render_otel(d))
              if p is not None]
     if not parts:
         return Group(Panel(Text(
