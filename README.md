@@ -6,27 +6,8 @@ A terminal TUI showing your whole Claude Code spend in one self-refreshing view,
 - **Live plan limits** — the actual 5h/7d utilization from the Anthropic OAuth endpoint (the same source `/usage` reads)
 - **rtk** — savings of the shell proxy, from its SQLite DB (`~/.local/share/rtk/history.db`)
 - **caveman** — savings of the output compression (`~/.claude/.caveman-history.jsonl`)
-- **Claude Code telemetry** — what subagents, skills and MCP servers cost, scraped from
-  Claude Code's own Prometheus endpoint
 
-rtk, caveman and the telemetry are all optional and independent. With none of
-them set up everything else still works — the limits, cost, tokens, sessions
-and compaction advice depend on none of them — and each panel says what it is
-missing.
-
-Telemetry is the only source that can say **what subagents cost**: a subagent
-writes no transcript, so that spend is invisible to every other panel here. To
-turn it on, start Claude Code with:
-
-```bash
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=prometheus
-export OTEL_EXPORTER_PROMETHEUS_PORT=9464   # optional, this is the default
-```
-
-The figures then appear in the Economics tab. They are counters inside the
-running Claude Code process, so they start at zero with it and one endpoint
-covers one process — the panel states both.
+rtk and caveman are optional. With neither installed everything else still works, and each panel says which of the two it is missing.
 
 ![The Overview tab: live 5h/7d limits, the active sessions with their per-turn cost and compaction advice, the totals, and the rtk and caveman summaries](docs/overview.png)
 
@@ -82,7 +63,7 @@ The symlink points at the repo, so a `git pull` takes effect immediately — not
 | rtk | total savings, daily history, top projects |
 | caveman | lifetime savings, daily history, latest snapshot |
 | Projects | cost per project |
-| Economics | cost per turn, compaction break-even, billing rates, telemetry (subagent/skill/MCP cost) |
+| Economics | cost per turn, compaction break-even, billing rates |
 
 Keys: `1-9` jump to a tab, `tab`/`shift+tab` next/previous, `↑/↓` scroll a line, `pgup/pgdn` scroll a page, `home/end` top/bottom, `t` cycle theme (persisted), `r` refresh now, `s`/`S` sessions sort column/direction, `/` filter sessions, `?` help, `,` settings, `q` quit.
 
@@ -115,7 +96,6 @@ On start a snapshot from `~/.cache/cstats/dashboard.json` is shown immediately, 
 | live limits | `GET api.anthropic.com/api/oauth/usage` | 5h/7d utilization in %, per-model weekly caps, extra-usage credits |
 | rtk | `~/.local/share/rtk/history.db` | `commands` table, 90 days |
 | caveman | `~/.claude/.caveman-history.jsonl` | lifetime savings |
-| telemetry | `GET 127.0.0.1:9464/metrics` | cost/tokens by subagent, skill, MCP server |
 
 Costs are hypothetical API-equivalent prices from the standard price list, not a real bill.
 
@@ -144,7 +124,6 @@ cstats/
   economics.py     # cost per turn, compaction break-even
   compacts.py      # compaction history from the transcripts
   session_cache.py # incremental per-file parse cache
-  otel.py          # Claude Code telemetry (Prometheus scrape, optional)
   aggregate.py     # aggregation + JSON serialization (cache)
   service.py       # thread-safe data holder, cache + refresh
   notify.py        # desktop notifications

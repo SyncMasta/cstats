@@ -7,49 +7,47 @@ agents in `AGENTS.md`.
 
 ## Current state
 
-- Branch `claude/cstats-project-review-b9hmby`, pushed to
+- Branch: `claude/cstats-project-review-b9hmby`, pushed to
   `github.com/SyncMasta/cstats` (PR #1). The repo also lives at `NEXAT/cstats`
-  on the company GitLab; `cstats --update` follows whichever remote is set.
-- Version 0.4.0, `CACHE_VERSION` 14.
+  on the company GitLab; `cstats --update` follows whichever remote the
+  checkout has.
+- Version 0.4.0, `CACHE_VERSION` 13.
 - `test_compacts.py` and `test_session_cache.py` green. `smoke_test.py` needs a
   real local history — it asserts the Tokens pane scrolls, which a day or two
   of transcripts cannot fill at 120x40, and stops there on a fresh checkout.
 
 ## Last session
 
-**Repo review**, then its findings. `bin/cstats` and the worktree script had
-lost their executable bit in the GitHub web upload, so the documented entry
-point returned "Permission denied" for anyone cloning. `limits.py` was the last
-reader still hard-coding `~/.claude` instead of honouring `CLAUDE_CONFIG_DIR`,
-and its no-token message named a path that does not exist on macOS, where the
-token lives in the login keychain.
+**Repo review**, then the small findings fixed. `bin/cstats` and
+`scripts/setup_agent_worktree.sh` had lost their executable bit in the GitHub
+web upload, so the documented entry point returned "Permission denied" for
+anyone cloning. Dropped a 1-byte `test` artefact and the dead
+`caveman.CAVEMAN_HISTORY` constant.
 
-**The OAuth response is read in full** (§6): `seven_day_opus` /
-`seven_day_sonnet` and the extra-usage ceiling were fetched and discarded, so
-the panel could read 35% while Opus sat at 88%.
+**More of the OAuth response is now read** (`ARCHITECTURE.md` §6). The endpoint
+already returned `seven_day_opus` / `seven_day_sonnet` and the extra-usage
+ceiling; the tool fetched them and threw them away, so the panel could read 35%
+while Opus sat at 88%. `check_model_limit_windows()` covers both directions and
+asserts on the pace *row*: the panel above prints the same labels, so a
+document-wide assertion passes straight over a clipped column.
 
-**Added `otel.py`** (§10), a fourth optional source. Claude Code exports
-telemetry to no file, so it scrapes the Prometheus endpoint the CLI serves. It
-exists for the one thing the transcripts cannot give: what subagents cost — 0
-lines in the whole history carry `isSidechain`. Shown in the Economics tab; the
-digit keys 1-9 are full, and a cost question belongs there anyway.
+`limits.credentials_path()` honours `CLAUDE_CONFIG_DIR` like every other reader
+(this module was the last hold-out) and the no-token reason names the macOS
+keychain instead of a path that does not exist there.
 
 ## Open
 
-- **The telemetry reader is untested end to end.** Built against the documented
-  format and pinned by `check_otel_reader()` (names, parsing, the four
-  statuses, cache round trip, panel) over a real HTTP round trip — but no
-  Claude Code with telemetry on has ever answered it. `unknown_metrics` exists
-  so a drifted name shows up in the panel instead of as a plausible zero.
-- **macOS still has no token to read.** That needs
-  `security find-generic-password`, which can raise a blocking system prompt
-  from the refresh thread — deliberately not done; the reason line says so.
-- **Cross-checking `pricing.py` against `claude_code.cost.usage`** is tempting
-  and currently unsound: those counters cover one process since it started,
-  every other total here covers the whole history, and the metrics carry no
-  process start time to align them.
-- The Admin and Claude Code Analytics APIs report subscription usage per user
-  and day, but need an organisation and an admin key — no path for a personal
-  plan.
-- The compaction hint fires at $0.10/turn and ordinary sessions sit right
-  there. If it gets noisy, raise the threshold with `,`. Not changed in code.
+- **macOS has no token to read.** Claude Code stores it in the login keychain
+  (`Claude Code-credentials`). Reading it means `security find-generic-password`,
+  which can raise a blocking system prompt from the refresh thread — deliberately
+  not done; the reason line says so instead. Unresolved, not forgotten.
+- **OpenTelemetry is the one unused source.** Documented for individual Pro/Max
+  accounts; `claude_code.api_request` carries `cost_usd_micros`, `query_source`
+  (main/subagent/auxiliary) and per-skill/plugin/MCP attribution. Subagent cost
+  is not derivable from the transcripts at all (§6c: **0 lines** with
+  `isSidechain: true`), and `claude_code.cost.usage` is the only outside check
+  on our own price table. Fits the rtk/caveman pattern. The Admin and Claude
+  Code Analytics APIs report the same thing but need an org and an admin key.
+- The compaction hint fires at $0.10/turn and ordinary sessions now sit right
+  there. If it gets noisy, raise the threshold in the TUI with `,`.
+  Deliberately not changed in code.

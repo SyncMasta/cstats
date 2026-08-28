@@ -6,8 +6,8 @@
 ~/.claude/projects/*/*.jsonl ──┐
 OAuth /api/oauth/usage ────────┤
 ~/.local/share/rtk/history.db ─┼─→ aggregate.build() ─→ Dashboard ─┬─→ TUI (app.py + views.py)
-~/.claude/.caveman-history ────┤                                   ├─→ --json / --line
-127.0.0.1:9464/metrics (OTel) ─┘                                   └─→ ~/.cache/cstats/dashboard.json
+~/.claude/.caveman-history ────┘                                  ├─→ --json / --line
+                                                                  └─→ ~/.cache/cstats/dashboard.json
 ```
 
 A single `Dashboard` object is the interface between every data source and
@@ -143,7 +143,6 @@ Python reads with the stdlib.
 | live limits | `GET api.anthropic.com/api/oauth/usage` | JSON via the OAuth token in `~/.claude/.credentials.json` | undocumented, rate-limits aggressively (429) — needs a backoff, otherwise the display freezes |
 | rtk | `~/.local/share/rtk/history.db` | SQLite, table `commands` | 90-day retention; UTC timestamps, no `session_id` — only `project_path` |
 | caveman | `~/.claude/.caveman-history.jsonl` | JSONL, snapshots per session | the newest per `session_id` counts; written **only** by `/caveman-stats` or a Stop hook of your own. `output`/`turns` carry no `message.id` dedupe (2.6x too high), `model` is the session's first answer, `ts` is the write time with no span |
-| Claude Code telemetry | `GET 127.0.0.1:9464/metrics` | Prometheus text | opt-in (`CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_METRICS_EXPORTER=prometheus`); counters live in the Claude Code **process** and reset with it, so a scrape is a snapshot, not a history. Names carry the unit and `_total` — or not, depending on the exporter list — so they are matched after normalisation |
 
 ## Modules (`cstats/`)
 
@@ -167,7 +166,6 @@ Python reads with the stdlib.
 | `economics.py` | cost per turn per session, compaction break-even, billing rates |
 | `compacts.py` | compaction history from the transcripts (byte scan, its own file cache), growth rate of active sessions |
 | `session_cache.py` | incremental per-file parse cache for `parse_sessions()` |
-| `otel.py` | Claude Code's Prometheus telemetry endpoint (optional; subagent/skill/MCP cost) |
 
 ## Central design decisions
 
@@ -650,63 +648,6 @@ In the UI:
   entirely.
 
 `smoke_test.py` checks the tab labelling in both directions.
-
-### 10. Claude Code telemetry (`otel.py`)
-
-A fourth source, optional exactly like rtk and caveman: the dashboard's own
-numbers — limits, tokens, cost, context, compaction advice — depend on none of
-it, and with telemetry off nothing about the tool changes.
-
-It exists for one thing the transcripts cannot give: **what subagents cost**.
-`isSidechain: true` appears on **0 lines** of the whole history (§6c) — a
-subagent leaves no transcript at all, so its spend is not hard to attribute
-here, it is absent. `claude_code.cost.usage` carries `query_source`
-(`main`/`subagent`/`auxiliary`) and splits it directly; the same labels
-attribute cost to a skill, a plugin and an individual MCP server.
-
-**Transport.** Claude Code exports telemetry to `otlp`, `prometheus`, `console`
-or `none` — none of them a file (only `OTEL_LOG_RAW_API_BODIES` has a file
-mode, and that is raw request bodies, not metrics). So unlike rtk's SQLite and
-caveman's JSONL there is nothing on disk to read. The Prometheus exporter is
-the one local transport needing neither a collector nor a listening socket in
-this tool: Claude Code serves a scrape endpoint, we GET it through urllib.
-Enabled with `CLAUDE_CODE_ENABLE_TELEMETRY=1` and
-`OTEL_METRICS_EXPORTER=prometheus`; the port comes from
-`OTEL_EXPORTER_PROMETHEUS_PORT` (9464), overridable for us with
-`CSTATS_OTEL_PORT` / `CSTATS_OTEL_HOST`.
-
-**What that costs, and why the panel says so.** The counters live in the Claude
-Code *process*: they start at zero when it starts and vanish when it exits. So
-this is what the running session has spent, not a history — and after a restart
-the numbers drop back to near zero, which without the panel's window line reads
-as data loss rather than as a new process. One endpoint is also one process; a
-second Claude Code needs its own port.
-
-**Names are matched after normalisation, not literally.** The exporter appends
-the unit and `_total`, so `claude_code.cost.usage` arrives as
-`claude_code_cost_usage_USD_total` — except that Claude Code omits the `USD`,
-`tokens` and `s` units when prometheus is the only exporter listed, giving
-`claude_code_cost_usage_total` from the same build. `_canonical()` strips
-`_total` **once** (because `claude_code.active_time.total` genuinely ends in
-it) and then a known unit. Every `claude_code` name it does not recognise goes
-into `unknown_metrics` and is shown in the panel: a renamed metric is precisely
-how an integration like this goes quietly blind, and a named gap beats a
-plausible-looking zero.
-
-**Deliberately not built: a cross-check against our own cost.** Claude Code
-prices the same calls, so `claude_code.cost.usage` looks like the outside audit
-of `pricing.py` that requirement 8 wants. It is not, without a shared window:
-these counters cover one process since it started, every other total here
-covers the whole history. The difference between them would look meaningful and
-mean nothing.
-
-**Statuses**, the same four as §9: `missing` (nothing listening — telemetry off
-or Claude Code not running), `empty` (something answered but served no
-`claude_code` metrics — often another exporter on that port), `error` (answered
-and unusable, or every name drifted at once), `ok`. The panel is hidden only on
-`missing`, the ordinary state of a machine that never opted in; `empty` and
-`error` mean you configured something that is not working, and a silent panel
-would leave no way to tell a wrong port from a quiet one.
 
 ## Data flow when something fails
 
