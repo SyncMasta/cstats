@@ -56,7 +56,7 @@ The symlink points at the repo, so a `git pull` takes effect immediately — not
 | Tab | Contents |
 |---|---|
 | Overview | live limits (5h/7d), totals, rtk & caveman summary, top models |
-| Limits | 5h/7d values, reset times, **pace indicator** (spent vs. elapsed window time) |
+| Limits | 5h/7d values plus the Opus/Sonnet weekly caps where the plan has them, reset times, **pace indicator** (spent vs. elapsed window time) |
 | Tokens | daily cost/tokens (30 days), bar chart, sparkline |
 | Activity | weekday/hour heatmap, bucketed per message |
 | Sessions | one row per session, sortable and filterable |
@@ -93,7 +93,7 @@ On start a snapshot from `~/.cache/cstats/dashboard.json` is shown immediately, 
 | Source | Path | What it gives |
 |---|---|---|
 | session transcripts | `~/.claude/projects/*/*.jsonl` | tokens, cost, sessions |
-| live limits | `GET api.anthropic.com/api/oauth/usage` | 5h/7d utilization in % |
+| live limits | `GET api.anthropic.com/api/oauth/usage` | 5h/7d utilization in %, per-model weekly caps, extra-usage credits |
 | rtk | `~/.local/share/rtk/history.db` | `commands` table, 90 days |
 | caveman | `~/.claude/.caveman-history.jsonl` | lifetime savings |
 

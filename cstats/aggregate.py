@@ -298,7 +298,7 @@ def build(force_limits=False) -> Dashboard:
 # counts, not the full transcripts.
 # ---------------------------------------------------------------------------
 # bump when the cached shape changes so old caches are discarded automatically
-CACHE_VERSION = 12
+CACHE_VERSION = 13
 
 
 def dashboard_to_json(d: Dashboard) -> dict:
@@ -400,8 +400,14 @@ def _limits_to_json(l) -> dict:
         "five_hour_resets_at": l.five_hour_resets_at,
         "seven_day_pct": l.seven_day_pct,
         "seven_day_resets_at": l.seven_day_resets_at,
+        "seven_day_opus_pct": l.seven_day_opus_pct,
+        "seven_day_opus_resets_at": l.seven_day_opus_resets_at,
+        "seven_day_sonnet_pct": l.seven_day_sonnet_pct,
+        "seven_day_sonnet_resets_at": l.seven_day_sonnet_resets_at,
         "extra_usage_enabled": l.extra_usage_enabled,
         "extra_usage_used": l.extra_usage_used,
+        "extra_usage_limit": l.extra_usage_limit,
+        "extra_usage_pct": l.extra_usage_pct,
         "fetched_at": l.fetched_at,
         "rate_limited": l.rate_limited,
         "reason": l.reason,
@@ -416,8 +422,16 @@ def _limits_from_json(obj: dict) -> limits_mod.UsageLimits:
     l.five_hour_resets_at = obj.get("five_hour_resets_at")
     l.seven_day_pct = obj.get("seven_day_pct")
     l.seven_day_resets_at = obj.get("seven_day_resets_at")
+    l.seven_day_opus_pct = obj.get("seven_day_opus_pct")
+    l.seven_day_opus_resets_at = obj.get("seven_day_opus_resets_at")
+    l.seven_day_sonnet_pct = obj.get("seven_day_sonnet_pct")
+    l.seven_day_sonnet_resets_at = obj.get("seven_day_sonnet_resets_at")
     l.extra_usage_enabled = bool(obj.get("extra_usage_enabled"))
     l.extra_usage_used = float(obj.get("extra_usage_used") or 0.0)
+    # None and 0.0 are different answers here (see limits._from_raw), so these
+    # two round-trip as None rather than through `or 0.0`.
+    l.extra_usage_limit = obj.get("extra_usage_limit")
+    l.extra_usage_pct = obj.get("extra_usage_pct")
     l.fetched_at = obj.get("fetched_at")
     l.rate_limited = bool(obj.get("rate_limited"))
     l.reason = obj.get("reason")

@@ -184,6 +184,74 @@ def _limit_window(title, pct, resets_at):
     return Group(*block)
 
 
+def _limit_windows(l):
+    """The plan windows the endpoint actually reported, in display order.
+
+    Returns (title, short, pct, resets_at, window_hours) per window. `short`
+    exists because the pace table's Window column is fixed-width and a rich
+    table drops trailing columns rather than shrink them, so a long title there
+    silently costs the Projection column (check_narrow_widths()).
+
+    The two model-family entries only appear on plans that cap a family
+    separately — elsewhere the endpoint reports null for the whole key, and a
+    window with no data must not be drawn as an empty bar. Where they do exist
+    the family window is regularly the one that actually blocks, and it is a
+    different limit from the plan-wide weekly one: switching model helps
+    against a family cap and does nothing against the other.
+    """
+    out = [("5h session window", "5h", l.five_hour_pct, l.five_hour_resets_at, 5),
+           ("7d weekly window", "7d", l.seven_day_pct, l.seven_day_resets_at, 7 * 24)]
+    for title, short, pct, resets in (
+        ("7d Opus window", "7d Opus", getattr(l, "seven_day_opus_pct", None),
+         getattr(l, "seven_day_opus_resets_at", None)),
+        ("7d Sonnet window", "7d Sonnet", getattr(l, "seven_day_sonnet_pct", None),
+         getattr(l, "seven_day_sonnet_resets_at", None)),
+    ):
+        if pct is not None:
+            out.append((title, short, pct, resets, 7 * 24))
+    return out
+
+
+def _limit_windows_grid(windows, per_row=2):
+    """Lay the windows out `per_row` to a row, every cell a ratio column.
+
+    Two per row, not all in one: `_limit_window` draws an 18-wide bar plus its
+    percentage, so four side by side want ~110 columns — and
+    check_narrow_widths() exists because rich drops the trailing columns of a
+    too-wide table instead of shrinking them. Wrapping keeps every cell as wide
+    as it was back when there were only ever two windows.
+    """
+    grid = Table.grid(expand=True, padding=(0, 2))
+    for _ in range(per_row):
+        grid.add_column(ratio=1)
+    for i in range(0, len(windows), per_row):
+        chunk = windows[i:i + per_row]
+        cells = [_limit_window(t, pct, resets) for t, _s, pct, resets, _h in chunk]
+        cells += [Text("")] * (per_row - len(cells))
+        grid.add_row(*cells)
+    return grid
+
+
+def _extra_usage_note(l):
+    """The extra-usage line: credits spent against the ceiling they run to.
+
+    The ceiling and the percentage are reported independently of the spend, and
+    each can be absent while extra usage is enabled, so each is shown only once
+    it exists — spend without its reference size is a number you cannot read.
+    """
+    used = l.extra_usage_used or 0.0
+    limit = getattr(l, "extra_usage_limit", None)
+    pct = getattr(l, "extra_usage_pct", None)
+    txt = "extra usage: enabled"
+    if limit:
+        txt += f" · {used:,.0f} of {limit:,.0f} credits"
+        if pct is not None:
+            txt += f" ({pct:.0f}%)"
+    elif used:
+        txt += f" · {used:,.0f} credits used"
+    return Text(txt + "  ·  ", style="green")
+
+
 def kpi(label, value, sub=""):
     t = Text()
     t.append(f"{label}\n", style="bold cyan")
@@ -430,19 +498,11 @@ def render_overview(d: aggregate.Dashboard, width=100, error=None, alert_usd=Non
     # a quarter of a wide terminal and the reset times sat far from the bar
     # they belong to.
     if d.limits.available:
-        windows = Table.grid(expand=True, padding=(0, 2))
-        windows.add_column(ratio=1)
-        windows.add_column(ratio=1)
-        windows.add_row(
-            _limit_window("5h session window", d.limits.five_hour_pct,
-                          d.limits.five_hour_resets_at),
-            _limit_window("7d weekly window", d.limits.seven_day_pct,
-                          d.limits.seven_day_resets_at),
-        )
+        windows = _limit_windows_grid(_limit_windows(d.limits))
         foot = _freshness(d.limits.fetched_at, d.limits.rate_limited,
                       retry_in=getattr(d.limits, "retry_in", None))
         if d.limits.extra_usage_enabled:
-            foot = Text("extra usage: enabled  ·  ", style="green") + foot
+            foot = _extra_usage_note(d.limits) + foot
         items.append(Panel(Group(windows, Text(""), foot),
                            title="Live usage limits", border_style="cyan"))
     elif getattr(d.limits, "reason", None):
@@ -644,19 +704,11 @@ def render_limits(d: aggregate.Dashboard, width=100, history=None):
     # Same two blocks as the overview, deliberately: a four-column table of the
     # same two rows sat in the left third of the tab and repeated what the Pace
     # panel below already says in words.
-    windows = Table.grid(expand=True, padding=(0, 2))
-    windows.add_column(ratio=1)
-    windows.add_column(ratio=1)
-    windows.add_row(
-        _limit_window("5h session window", d.limits.five_hour_pct,
-                      d.limits.five_hour_resets_at),
-        _limit_window("7d weekly window", d.limits.seven_day_pct,
-                      d.limits.seven_day_resets_at),
-    )
+    windows = _limit_windows_grid(_limit_windows(d.limits))
     foot = _freshness(d.limits.fetched_at, d.limits.rate_limited,
                       retry_in=getattr(d.limits, "retry_in", None))
     if d.limits.extra_usage_enabled:
-        foot = Text("extra usage: enabled  \u00b7  ", style="green") + foot
+        foot = _extra_usage_note(d.limits) + foot
     items.append(Panel(Group(windows, Text(""), foot),
                        title="Plan limits (live, from OAuth endpoint)",
                        border_style="cyan"))
@@ -679,17 +731,23 @@ def render_limits(d: aggregate.Dashboard, width=100, history=None):
     # question ("am I going to make it to the reset?") and each used to be its
     # own two-line panel, so half the tab was borders.
     pace = Table(box=None, show_header=True, header_style="dim", padding=(0, 2), expand=True)
-    pace.add_column("Window", no_wrap=True, width=7)
+    # Measured from the labels that will actually be printed, not pinned to a
+    # number: this column is no_wrap and fixed-width, so a label one character
+    # longer than the guess is silently clipped ("7d Son…") — and the next
+    # family the endpoint starts reporting would do exactly that.
+    pace_wins = _limit_windows(d.limits)
+    label_w = max([len("Window")] + [len(sh) for _t, sh, _p, _r, _h in pace_wins])
+    pace.add_column("Window", no_wrap=True, width=label_w)
     pace.add_column("Used", justify="right", no_wrap=True, width=6)
     pace.add_column("Elapsed", justify="right", no_wrap=True, width=8)
     pace.add_column("Verdict", no_wrap=True, ratio=1, min_width=12)
     pace.add_column("Projection", no_wrap=True, overflow="ellipsis", ratio=1, min_width=14)
     now = datetime.now(timezone.utc)
     rows_added = 0
-    for label, pct, resets, hours in (
-        ("5 hours", d.limits.five_hour_pct, d.limits.five_hour_resets_at, 5),
-        ("7 days", d.limits.seven_day_pct, d.limits.seven_day_resets_at, 7 * 24),
-    ):
+    # Driven by the same list as the panel above: a family cap drawn as a bar
+    # but left out of the pace table would be the one window with no verdict,
+    # which is the opposite of what it needs.
+    for _title, label, pct, resets, hours in pace_wins:
         if pct is None or not resets:
             continue
         end_dt = _parse_iso(resets)

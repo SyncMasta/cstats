@@ -497,6 +497,41 @@ another 429, and the displayed percentages froze permanently on the last
 successful fetch. `UsageLimits.fetched_at`, `.age_s`, `.stale` and
 `.rate_limited` carry that state all the way into the views.
 
+**The response carries more windows than two.** Besides `five_hour` and
+`seven_day` the endpoint reports `seven_day_opus` and `seven_day_sonnet` — the
+per-model-family weekly caps. They matter because on the plans that have them
+the family window is regularly the one that actually blocks, and it is a
+*different* limit: against a family cap, switching model with `/model` keeps
+you working; against the plan-wide weekly window it does nothing. Showing only
+the plan-wide pair meant the panel could read 35% while Opus sat at 88%.
+
+A plan without a separate cap for a family reports `null` for the **whole
+key**, not an object with a null `utilization`, so `_from_raw` reads them
+through `or {}` and a window with no data produces no bar at all rather than an
+empty one. `extra_usage` is read the same way: `monthly_limit`, `used_credits`
+and `utilization` are each independently null while extra usage is enabled but
+unused, so none of them may be folded into a group `or 0.0` — a ceiling of 0
+reads as "no headroom left", the opposite of "not reported".
+
+Four windows do not fit side by side: `_limit_window` draws an 18-wide bar plus
+its percentage, so `_limit_windows_grid` wraps them two to a row and every cell
+stays as wide as it was when there were only two. The pace table takes its rows
+from the same list — a window drawn as a bar but missing from the table would
+be the only one without a verdict — and sizes its fixed-width `Window` column
+from the labels it is about to print, because a `no_wrap` column clips a label
+one character too long (`7d Son…`) instead of growing.
+
+**Where the token lives is platform-specific.** `credentials_path()` honours
+`CLAUDE_CONFIG_DIR` like every other reader in the tool; this module was the
+last one still hard-coding `~/.claude`, so a run against a synthetic config dir
+read the real credentials. On macOS the file is legitimately absent — Claude
+Code keeps the token in the login keychain under the service name
+`Claude Code-credentials`. The tool does not read it: that needs
+`security find-generic-password`, which can raise a blocking system prompt from
+inside the refresh thread. The reason line names the keychain instead, so the
+Mac case stops reporting as "no OAuth token in <path>", which is true to the
+letter and misleading.
+
 ### 6b. Day and hour buckets are built while parsing
 
 `Session.by_day` and `Session.by_hour` are filled **per line**, by the local
