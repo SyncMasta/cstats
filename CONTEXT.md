@@ -41,13 +41,16 @@ keychain instead of a path that does not exist there.
   (`Claude Code-credentials`). Reading it means `security find-generic-password`,
   which can raise a blocking system prompt from the refresh thread — deliberately
   not done; the reason line says so instead. Unresolved, not forgotten.
-- **OpenTelemetry is the one unused source.** Documented for individual Pro/Max
-  accounts; `claude_code.api_request` carries `cost_usd_micros`, `query_source`
-  (main/subagent/auxiliary) and per-skill/plugin/MCP attribution. Subagent cost
-  is not derivable from the transcripts at all (§6c: **0 lines** with
-  `isSidechain: true`), and `claude_code.cost.usage` is the only outside check
-  on our own price table. Fits the rtk/caveman pattern. The Admin and Claude
-  Code Analytics APIs report the same thing but need an org and an admin key.
+- **OpenTelemetry was built and removed again — do not rebuild it unasked.**
+  A working `otel.py` (Prometheus scrape, four statuses, Economics panel,
+  `check_otel_reader()`) was added and reverted on request: this tool is for
+  the rtk and caveman savings, and a fourth source is scope nobody asked for.
+  It is in the branch history if it is ever wanted (commit 6cb9a7b, reverted by
+  eacc34f). What it alone could give: subagent cost — §6c records **0 lines**
+  with `isSidechain: true`, so a subagent leaves no transcript and its spend is
+  invisible to every other panel here. The Admin and Claude Code Analytics APIs
+  report subscription usage per user and day but need an org and an admin key,
+  so there is no path for a personal plan either way.
 - The compaction hint fires at $0.10/turn and ordinary sessions now sit right
   there. If it gets noisy, raise the threshold in the TUI with `,`.
   Deliberately not changed in code.
